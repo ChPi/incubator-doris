@@ -75,6 +75,8 @@ public:
     RuntimeState* state() { return _state; }
 
     Status serialize_block(Block* src, PBlock* dest, int num_receivers = 1);
+    Status serialize_block(Block* src, PBlock* dest, std::string* compressed_buffer,
+                           int num_receivers = 1);
 
 protected:
     void _roll_pb_block();
@@ -131,9 +133,13 @@ protected:
 
     RuntimeProfile* _profile; // Allocated from _pool
     RuntimeProfile::Counter* _serialize_batch_timer;
+    RuntimeProfile::Counter* _compress_timer;
+    RuntimeProfile::Counter* _brpc_send_timer;
+    RuntimeProfile::Counter* _brpc_wait_timer;
     RuntimeProfile::Counter* _bytes_sent_counter;
     RuntimeProfile::Counter* _uncompressed_bytes_counter;
     RuntimeProfile::Counter* _ignore_rows;
+    RuntimeProfile::Counter* _local_sent_rows;
 
     std::unique_ptr<MemTracker> _mem_tracker;
 
@@ -146,6 +152,10 @@ protected:
 
     // User can change this config at runtime, avoid it being modified during query or loading process.
     bool _transfer_large_data_by_brpc = false;
+
+    std::string _compressed_data_buffer;
+
+    segment_v2::CompressionTypePB _compression_type;
 };
 
 // TODO: support local exechange
@@ -176,7 +186,7 @@ public:
         _is_local = (_brpc_dest_addr.hostname == localhost) &&
                     (_brpc_dest_addr.port == config::brpc_port);
         if (_is_local) {
-            LOG(INFO) << "will use local Exchange, dest_node_id is : " << _dest_node_id;
+            VLOG_NOTICE << "will use local Exchange, dest_node_id is : " << _dest_node_id;
         }
     }
 
@@ -204,7 +214,6 @@ public:
     // if batch is nullptr, send the eof packet
     Status send_block(PBlock* block, bool eos = false);
 
-    Status add_row(Block* block, int row);
     Status add_rows(Block* block, const std::vector<int>& row);
 
     Status send_current_block(bool eos = false);
@@ -238,6 +247,7 @@ public:
 
 private:
     Status _wait_last_brpc() {
+        SCOPED_TIMER(_parent->_brpc_wait_timer);
         if (_closure == nullptr) return Status::OK();
         auto cntl = &_closure->cntl;
         auto call_id = _closure->cntl.call_id();
@@ -247,7 +257,7 @@ private:
                     "failed to send brpc batch, error={}, error_text={}, client: {}",
                     berror(cntl->ErrorCode()), cntl->ErrorText(), BackendOptions::get_localhost());
             LOG(WARNING) << err;
-            return Status::ThriftRpcError(err);
+            return Status::RpcError(err);
         }
         return Status::OK();
     }
@@ -299,6 +309,9 @@ private:
     PBlock* _ch_cur_pb_block = nullptr;
     PBlock _ch_pb_block1;
     PBlock _ch_pb_block2;
+    std::string _compressed_data_buffer;
+
+    bool _enable_local_exchange = false;
 };
 
 template <typename Channels, typename HashVals>

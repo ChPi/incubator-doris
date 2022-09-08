@@ -34,6 +34,7 @@ import com.google.common.collect.Lists;
 import org.apache.commons.lang3.StringUtils;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -81,13 +82,13 @@ public class UnboundRelation extends LogicalLeaf implements Unbound {
     }
 
     @Override
-    public LogicalProperties computeLogicalProperties(Plan... inputs) {
-        return new UnboundLogicalProperties();
+    public LogicalProperties computeLogicalProperties() {
+        return UnboundLogicalProperties.INSTANCE;
     }
 
     @Override
     public Plan withGroupExpression(Optional<GroupExpression> groupExpression) {
-        return new UnboundRelation(nameParts, groupExpression, Optional.of(logicalProperties));
+        return new UnboundRelation(nameParts, groupExpression, Optional.of(getLogicalProperties()));
     }
 
     @Override
@@ -113,5 +114,25 @@ public class UnboundRelation extends LogicalLeaf implements Unbound {
     @Override
     public List<Expression> getExpressions() {
         throw new UnsupportedOperationException(this.getClass().getSimpleName() + " don't support getExpression()");
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        if (!super.equals(o)) {
+            return false;
+        }
+        UnboundRelation that = (UnboundRelation) o;
+        return Objects.equals(nameParts, that.nameParts);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(super.hashCode(), nameParts);
     }
 }

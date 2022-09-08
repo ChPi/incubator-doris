@@ -30,6 +30,19 @@
 
 class SipHash;
 
+#define SIP_HASHES_FUNCTION_COLUMN_IMPL()                                \
+    auto s = hashes.size();                                              \
+    DCHECK(s == size());                                                 \
+    if (null_data == nullptr) {                                          \
+        for (size_t i = 0; i < s; i++) {                                 \
+            update_hash_with_value(i, hashes[i]);                        \
+        }                                                                \
+    } else {                                                             \
+        for (size_t i = 0; i < s; i++) {                                 \
+            if (null_data[i] == 0) update_hash_with_value(i, hashes[i]); \
+        }                                                                \
+    }
+
 namespace doris::vectorized {
 
 class Arena;
@@ -286,6 +299,14 @@ public:
     ///  passed bytes to hash must identify sequence of values unambiguously.
     virtual void update_hash_with_value(size_t n, SipHash& hash) const = 0;
 
+    /// Update state of hash function with value of n elements to avoid the virtual function call
+    /// null_data to mark whether need to do hash compute, null_data == nullptr
+    /// means all element need to do hash function, else only *null_data != 0 need to do hash func
+    virtual void update_hashes_with_value(std::vector<SipHash>& hash,
+                                          const uint8_t* __restrict null_data = nullptr) const {
+        LOG(FATAL) << "update_hashes_with_value not supported";
+    };
+
     /** Removes elements that don't match the filter.
       * Is used in WHERE and HAVING operations.
       * If result_size_hint > 0, then makes advance reserve(result_size_hint) for the result column;
@@ -340,12 +361,18 @@ public:
     virtual void get_permutation(bool reverse, size_t limit, int nan_direction_hint,
                                  Permutation& res) const = 0;
 
+    // 32bit offsets for string
+    using Offset = UInt32;
+    using Offsets = PaddedPODArray<Offset>;
+
+    // 64bit offsets for array
+    using Offset64 = UInt64;
+    using Offsets64 = PaddedPODArray<Offset64>;
+
     /** Copies each element according offsets parameter.
       * (i-th element should be copied offsets[i] - offsets[i - 1] times.)
       * It is necessary in ARRAY JOIN operation.
       */
-    using Offset = UInt64;
-    using Offsets = PaddedPODArray<Offset>;
     virtual Ptr replicate(const Offsets& offsets) const = 0;
 
     virtual void replicate(const uint32_t* counts, size_t target_size, IColumn& column) const {
@@ -360,6 +387,8 @@ public:
     using Selector = PaddedPODArray<ColumnIndex>;
     virtual std::vector<MutablePtr> scatter(ColumnIndex num_columns,
                                             const Selector& selector) const = 0;
+
+    virtual void append_data_by_selector(MutablePtr& res, const Selector& selector) const = 0;
 
     /// Insert data from several other columns according to source mask (used in vertical merge).
     /// For now it is a helper to de-virtualize calls to insert*() functions inside gather loop
@@ -513,22 +542,16 @@ public:
     virtual void replace_column_data_default(size_t self_row = 0) = 0;
 
     virtual bool is_date_type() const { return is_date; }
-    virtual bool is_date_v2_type() const { return is_date_v2; }
-    virtual bool is_datetime_v2_type() const { return is_datetime_v2; }
     virtual bool is_datetime_type() const { return is_date_time; }
     virtual bool is_decimalv2_type() const { return is_decimalv2; }
 
     virtual void set_date_type() { is_date = true; }
-    virtual void set_date_v2_type() { is_date_v2 = true; }
-    virtual void set_datetime_v2_type() { is_datetime_v2 = true; }
     virtual void set_datetime_type() { is_date_time = true; }
     virtual void set_decimalv2_type() { is_decimalv2 = true; }
 
     // todo(wb): a temporary implemention, need re-abstract here
     bool is_date = false;
     bool is_date_time = false;
-    bool is_date_v2 = false;
-    bool is_datetime_v2 = false;
     bool is_decimalv2 = false;
 
 protected:
@@ -536,6 +559,9 @@ protected:
     /// In derived classes (that use final keyword), implement scatter method as call to scatter_impl.
     template <typename Derived>
     std::vector<MutablePtr> scatter_impl(ColumnIndex num_columns, const Selector& selector) const;
+
+    template <typename Derived>
+    void append_data_by_selector_impl(MutablePtr& res, const Selector& selector) const;
 };
 
 using ColumnPtr = IColumn::Ptr;

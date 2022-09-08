@@ -58,8 +58,10 @@ RowBlockV2::~RowBlockV2() {
     delete[] _selection_vector;
 }
 
+// RowBlockV2 has more columns than RowBlockV1, so that should use rowblock v1's columnids.
+// It means will omit some columns.
 Status RowBlockV2::convert_to_row_block(RowCursor* helper, RowBlock* dst) {
-    for (auto cid : _schema.column_ids()) {
+    for (auto cid : dst->row_block_info().column_ids) {
         bool is_nullable = _schema.column(cid)->is_nullable();
         if (is_nullable) {
             for (uint16_t i = 0; i < _selected_size; ++i) {
@@ -70,9 +72,16 @@ Status RowBlockV2::convert_to_row_block(RowCursor* helper, RowBlock* dst) {
                     helper->set_null(cid);
                 } else {
                     helper->set_not_null(cid);
-                    helper->set_field_content_shallow(
-                            cid,
-                            reinterpret_cast<const char*>(column_block(cid).cell_ptr(row_idx)));
+                    if (is_scalar_type(_schema.column(cid)->type())) {
+                        helper->set_field_content_shallow(
+                                cid,
+                                reinterpret_cast<const char*>(column_block(cid).cell_ptr(row_idx)));
+                    } else {
+                        helper->set_field_content(
+                                cid,
+                                reinterpret_cast<const char*>(column_block(cid).cell_ptr(row_idx)),
+                                _pool.get());
+                    }
                 }
             }
         } else {
@@ -80,8 +89,15 @@ Status RowBlockV2::convert_to_row_block(RowCursor* helper, RowBlock* dst) {
                 uint16_t row_idx = _selection_vector[i];
                 dst->get_row(i, helper);
                 helper->set_not_null(cid);
-                helper->set_field_content_shallow(
-                        cid, reinterpret_cast<const char*>(column_block(cid).cell_ptr(row_idx)));
+                if (is_scalar_type(_schema.column(cid)->type())) {
+                    helper->set_field_content_shallow(
+                            cid,
+                            reinterpret_cast<const char*>(column_block(cid).cell_ptr(row_idx)));
+                } else {
+                    helper->set_field_content(
+                            cid, reinterpret_cast<const char*>(column_block(cid).cell_ptr(row_idx)),
+                            _pool.get());
+                }
             }
         }
     }

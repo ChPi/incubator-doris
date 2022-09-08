@@ -185,6 +185,11 @@ public:
         LOG(FATAL) << "scatter not supported in ColumnDictionary";
     }
 
+    void append_data_by_selector(MutableColumnPtr& res,
+                                 const IColumn::Selector& selector) const override {
+        LOG(FATAL) << "append_data_by_selector is not supported in ColumnDictionary!";
+    }
+
     Status filter_by_selector(const uint16_t* sel, size_t sel_size, IColumn* col_ptr) override {
         auto* res_col = reinterpret_cast<vectorized::ColumnString*>(col_ptr);
         for (size_t i = 0; i < sel_size; i++) {
@@ -257,6 +262,9 @@ public:
     bool is_dict_code_converted() const { return _dict_code_converted; }
 
     MutableColumnPtr convert_to_predicate_column_if_dictionary() override {
+        if (is_dict_sorted() && !is_dict_code_converted()) {
+            convert_dict_codes_if_necessary();
+        }
         auto res = vectorized::PredicateColumnType<TYPE_STRING>::create();
         res->reserve(_reserve_size);
         for (size_t i = 0; i < _codes.size(); ++i) {
@@ -293,7 +301,7 @@ public:
             return -2; // -1 is null code
         }
 
-        T get_null_code() { return -1; }
+        T get_null_code() const { return -1; }
 
         inline StringValue& get_value(T code) {
             return code >= _dict_data.size() ? _null_value : _dict_data[code];
@@ -388,7 +396,12 @@ public:
             }
         }
 
-        T convert_code(const T& code) const { return _code_convert_table[code]; }
+        T convert_code(const T& code) const {
+            if (get_null_code() == code) {
+                return code;
+            }
+            return _code_convert_table[code];
+        }
 
         size_t byte_size() { return _dict_data.size() * sizeof(_dict_data[0]); }
 

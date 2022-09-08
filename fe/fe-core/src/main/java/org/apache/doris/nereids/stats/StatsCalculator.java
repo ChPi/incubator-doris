@@ -17,7 +17,10 @@
 
 package org.apache.doris.nereids.stats;
 
-import org.apache.doris.catalog.Table;
+import org.apache.doris.catalog.MaterializedIndex;
+import org.apache.doris.catalog.OlapTable;
+import org.apache.doris.catalog.Partition;
+import org.apache.doris.common.AnalysisException;
 import org.apache.doris.nereids.memo.GroupExpression;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.NamedExpression;
@@ -29,75 +32,87 @@ import org.apache.doris.nereids.trees.plans.algebra.Filter;
 import org.apache.doris.nereids.trees.plans.algebra.Limit;
 import org.apache.doris.nereids.trees.plans.algebra.Project;
 import org.apache.doris.nereids.trees.plans.algebra.Scan;
+import org.apache.doris.nereids.trees.plans.algebra.TopN;
 import org.apache.doris.nereids.trees.plans.logical.LogicalAggregate;
+import org.apache.doris.nereids.trees.plans.logical.LogicalAssertNumRows;
 import org.apache.doris.nereids.trees.plans.logical.LogicalFilter;
 import org.apache.doris.nereids.trees.plans.logical.LogicalJoin;
 import org.apache.doris.nereids.trees.plans.logical.LogicalLimit;
 import org.apache.doris.nereids.trees.plans.logical.LogicalOlapScan;
 import org.apache.doris.nereids.trees.plans.logical.LogicalProject;
 import org.apache.doris.nereids.trees.plans.logical.LogicalSort;
+import org.apache.doris.nereids.trees.plans.logical.LogicalTopN;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalAggregate;
-import org.apache.doris.nereids.trees.plans.physical.PhysicalDistribution;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalAssertNumRows;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalDistribute;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalFilter;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashJoin;
-import org.apache.doris.nereids.trees.plans.physical.PhysicalHeapSort;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalLimit;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalLocalQuickSort;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalNestedLoopJoin;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalOlapScan;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalProject;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalQuickSort;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalTopN;
 import org.apache.doris.nereids.trees.plans.visitor.DefaultPlanVisitor;
 import org.apache.doris.nereids.util.Utils;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.statistics.ColumnStats;
+import org.apache.doris.statistics.Statistics;
 import org.apache.doris.statistics.StatsDeriveResult;
 import org.apache.doris.statistics.TableStats;
 
+import com.google.common.collect.Maps;
+
+import java.util.AbstractMap;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * Used to calculate the stats for each operator
+ * Used to calculate the stats for each plan
  */
 public class StatsCalculator extends DefaultPlanVisitor<StatsDeriveResult, Void> {
 
     private final GroupExpression groupExpression;
 
-    public StatsCalculator(GroupExpression groupExpression) {
+    private StatsCalculator(GroupExpression groupExpression) {
         this.groupExpression = groupExpression;
     }
 
     /**
-     * Do estimate.
+     * estimate stats
      */
-    public void estimate() {
+    public static void estimate(GroupExpression groupExpression) {
+        StatsCalculator statsCalculator = new StatsCalculator(groupExpression);
+        statsCalculator.estimate();
+    }
 
+    private void estimate() {
         StatsDeriveResult stats = groupExpression.getPlan().accept(this, null);
         groupExpression.getOwnerGroup().setStatistics(stats);
         groupExpression.setStatDerived(true);
-
     }
 
     @Override
-    public StatsDeriveResult visitLogicalLimit(LogicalLimit<Plan> limit, Void context) {
+    public StatsDeriveResult visitLogicalLimit(LogicalLimit<? extends Plan> limit, Void context) {
         return computeLimit(limit);
     }
 
     @Override
-    public StatsDeriveResult visitPhysicalLimit(PhysicalLimit<Plan> limit, Void context) {
+    public StatsDeriveResult visitPhysicalLimit(PhysicalLimit<? extends Plan> limit, Void context) {
         return computeLimit(limit);
     }
 
     @Override
-    public StatsDeriveResult visitLogicalAggregate(LogicalAggregate<Plan> aggregate, Void context) {
+    public StatsDeriveResult visitLogicalAggregate(LogicalAggregate<? extends Plan> aggregate, Void context) {
         return computeAggregate(aggregate);
     }
 
     @Override
-    public StatsDeriveResult visitLogicalFilter(LogicalFilter<Plan> filter, Void context) {
+    public StatsDeriveResult visitLogicalFilter(LogicalFilter<? extends Plan> filter, Void context) {
         return computeFilter(filter);
     }
 
@@ -108,23 +123,34 @@ public class StatsCalculator extends DefaultPlanVisitor<StatsDeriveResult, Void>
     }
 
     @Override
-    public StatsDeriveResult visitLogicalProject(LogicalProject<Plan> project, Void context) {
+    public StatsDeriveResult visitLogicalProject(LogicalProject<? extends Plan> project, Void context) {
         return computeProject(project);
     }
 
     @Override
-    public StatsDeriveResult visitLogicalSort(LogicalSort<Plan> sort, Void context) {
+    public StatsDeriveResult visitLogicalSort(LogicalSort<? extends Plan> sort, Void context) {
         return groupExpression.getCopyOfChildStats(0);
     }
 
     @Override
-    public StatsDeriveResult visitLogicalJoin(LogicalJoin<Plan, Plan> join, Void context) {
+    public StatsDeriveResult visitLogicalTopN(LogicalTopN<? extends Plan> topN, Void context) {
+        return computeTopN(topN);
+    }
+
+    @Override
+    public StatsDeriveResult visitLogicalJoin(LogicalJoin<? extends Plan, ? extends Plan> join, Void context) {
         return JoinEstimation.estimate(groupExpression.getCopyOfChildStats(0),
                 groupExpression.getCopyOfChildStats(1), join);
     }
 
     @Override
-    public StatsDeriveResult visitPhysicalAggregate(PhysicalAggregate<Plan> agg, Void context) {
+    public StatsDeriveResult visitLogicalAssertNumRows(
+            LogicalAssertNumRows<? extends Plan> assertNumRows, Void context) {
+        return groupExpression.getCopyOfChildStats(0);
+    }
+
+    @Override
+    public StatsDeriveResult visitPhysicalAggregate(PhysicalAggregate<? extends Plan> agg, Void context) {
         return computeAggregate(agg);
     }
 
@@ -134,18 +160,29 @@ public class StatsCalculator extends DefaultPlanVisitor<StatsDeriveResult, Void>
     }
 
     @Override
-    public StatsDeriveResult visitPhysicalHeapSort(PhysicalHeapSort<Plan> sort, Void context) {
+    public StatsDeriveResult visitPhysicalQuickSort(PhysicalQuickSort<? extends Plan> sort, Void context) {
         return groupExpression.getCopyOfChildStats(0);
     }
 
     @Override
-    public StatsDeriveResult visitPhysicalHashJoin(PhysicalHashJoin<Plan, Plan> hashJoin, Void context) {
+    public StatsDeriveResult visitPhysicalTopN(PhysicalTopN<? extends Plan> topN, Void context) {
+        return computeTopN(topN);
+    }
+
+    public StatsDeriveResult visitPhysicalLocalQuickSort(PhysicalLocalQuickSort<? extends Plan> sort, Void context) {
+        return groupExpression.getCopyOfChildStats(0);
+    }
+
+    @Override
+    public StatsDeriveResult visitPhysicalHashJoin(
+            PhysicalHashJoin<? extends Plan, ? extends Plan> hashJoin, Void context) {
         return JoinEstimation.estimate(groupExpression.getCopyOfChildStats(0),
                 groupExpression.getCopyOfChildStats(1), hashJoin);
     }
 
     @Override
-    public StatsDeriveResult visitPhysicalNestedLoopJoin(PhysicalNestedLoopJoin<Plan, Plan> nestedLoopJoin,
+    public StatsDeriveResult visitPhysicalNestedLoopJoin(
+            PhysicalNestedLoopJoin<? extends Plan, ? extends Plan> nestedLoopJoin,
             Void context) {
         return JoinEstimation.estimate(groupExpression.getCopyOfChildStats(0),
                 groupExpression.getCopyOfChildStats(1), nestedLoopJoin);
@@ -153,17 +190,23 @@ public class StatsCalculator extends DefaultPlanVisitor<StatsDeriveResult, Void>
 
     // TODO: We should subtract those pruned column, and consider the expression transformations in the node.
     @Override
-    public StatsDeriveResult visitPhysicalProject(PhysicalProject<Plan> project, Void context) {
+    public StatsDeriveResult visitPhysicalProject(PhysicalProject<? extends Plan> project, Void context) {
         return computeProject(project);
     }
 
     @Override
-    public StatsDeriveResult visitPhysicalFilter(PhysicalFilter<Plan> filter, Void context) {
+    public StatsDeriveResult visitPhysicalFilter(PhysicalFilter<? extends Plan> filter, Void context) {
         return computeFilter(filter);
     }
 
     @Override
-    public StatsDeriveResult visitPhysicalDistribution(PhysicalDistribution<Plan> distribution,
+    public StatsDeriveResult visitPhysicalDistribute(PhysicalDistribute<? extends Plan> distribute,
+            Void context) {
+        return groupExpression.getCopyOfChildStats(0);
+    }
+
+    @Override
+    public StatsDeriveResult visitPhysicalAssertNumRows(PhysicalAssertNumRows<? extends Plan> assertNumRows,
             Void context) {
         return groupExpression.getCopyOfChildStats(0);
     }
@@ -181,9 +224,9 @@ public class StatsCalculator extends DefaultPlanVisitor<StatsDeriveResult, Void>
     //       2. Consider the influence of runtime filter
     //       3. Get NDV and column data size from StatisticManger, StatisticManager doesn't support it now.
     private StatsDeriveResult computeScan(Scan scan) {
-        Table table = scan.getTable();
         TableStats tableStats = Utils.execWithReturnVal(() ->
-                ConnectContext.get().getEnv().getStatisticsManager().getStatistics().getTableStats(table.getId())
+                // TODO: tmp mock the table stats, after we support the table stats, we should remove this mock.
+                mockRowCountInStatistic(scan)
         );
         Map<Slot, ColumnStats> slotToColumnStats = new HashMap<>();
         Set<SlotReference> slotSet = scan.getOutput().stream().filter(SlotReference.class::isInstance)
@@ -203,54 +246,78 @@ public class StatsCalculator extends DefaultPlanVisitor<StatsDeriveResult, Void>
         return stats;
     }
 
+    // TODO: tmp mock the table stats, after we support the table stats, we should remove this mock.
+    private TableStats mockRowCountInStatistic(Scan scan) throws AnalysisException {
+        long cardinality = 0;
+        if (scan instanceof PhysicalOlapScan || scan instanceof LogicalOlapScan) {
+            OlapTable table = (OlapTable) scan.getTable();
+            for (long selectedPartitionId : table.getPartitionIds()) {
+                final Partition partition = table.getPartition(selectedPartitionId);
+                final MaterializedIndex baseIndex = partition.getBaseIndex();
+                cardinality += baseIndex.getRowCount();
+            }
+        }
+        Statistics statistics = ConnectContext.get().getEnv().getStatisticsManager().getStatistics();
+
+        statistics.mockTableStatsWithRowCount(scan.getTable().getId(), cardinality);
+        return statistics.getTableStats(scan.getTable().getId());
+    }
+
+    private StatsDeriveResult computeTopN(TopN topN) {
+        StatsDeriveResult stats = groupExpression.getCopyOfChildStats(0);
+        return stats.updateRowCountByLimit(topN.getLimit());
+    }
+
     private StatsDeriveResult computeLimit(Limit limit) {
         StatsDeriveResult stats = groupExpression.getCopyOfChildStats(0);
         return stats.updateRowCountByLimit(limit.getLimit());
     }
 
     private StatsDeriveResult computeAggregate(Aggregate aggregate) {
-        List<Expression> groupByExprList = aggregate.getGroupByExpressions();
+        List<Expression> groupByExpressions = aggregate.getGroupByExpressions();
         StatsDeriveResult childStats = groupExpression.getCopyOfChildStats(0);
-        Map<Slot, ColumnStats> childSlotColumnStatsMap = childStats.getSlotToColumnStats();
+        Map<Slot, ColumnStats> childSlotToColumnStats = childStats.getSlotToColumnStats();
         long resultSetCount = 1;
-        for (Expression expression : groupByExprList) {
-            List<SlotReference> slotRefList = expression.collect(SlotReference.class::isInstance);
+        for (Expression groupByExpression : groupByExpressions) {
+            Set<Slot> slots = groupByExpression.getInputSlots();
             // TODO: Support more complex group expr.
             //       For example:
             //              select max(col1+col3) from t1 group by col1+col3;
-            if (slotRefList.size() != 1) {
+            if (slots.size() != 1) {
                 continue;
             }
-            SlotReference slotRef = slotRefList.get(0);
-            ColumnStats columnStats = childSlotColumnStatsMap.get(slotRef);
+            Slot slotReference = slots.iterator().next();
+            ColumnStats columnStats = childSlotToColumnStats.get(slotReference);
             resultSetCount *= columnStats.getNdv();
         }
-        Map<Slot, ColumnStats> slotColumnStatsMap = new HashMap<>();
-        List<NamedExpression> namedExpressionList = aggregate.getOutputExpressions();
+        Map<Slot, ColumnStats> slotToColumnStats = Maps.newHashMap();
+        List<NamedExpression> outputExpressions = aggregate.getOutputExpressions();
         // TODO: 1. Estimate the output unit size by the type of corresponding AggregateFunction
         //       2. Handle alias, literal in the output expression list
-        for (NamedExpression namedExpression : namedExpressionList) {
-            if (namedExpression instanceof SlotReference) {
-                slotColumnStatsMap.put((SlotReference) namedExpression, new ColumnStats());
-            }
+        for (NamedExpression outputExpression : outputExpressions) {
+            slotToColumnStats.put(outputExpression.toSlot(), new ColumnStats());
         }
-        StatsDeriveResult statsDeriveResult = new StatsDeriveResult(resultSetCount, slotColumnStatsMap);
+        StatsDeriveResult statsDeriveResult = new StatsDeriveResult(resultSetCount, slotToColumnStats);
         // TODO: Update ColumnStats properly, add new mapping from output slot to ColumnStats
         return statsDeriveResult;
     }
 
-    // TODO: Update data size and min/max value.
+    // TODO: do real project on column stats
     private StatsDeriveResult computeProject(Project project) {
-        List<NamedExpression> namedExpressionList = project.getProjects();
-        Set<Slot> slotSet = new HashSet<>();
-        for (NamedExpression namedExpression : namedExpressionList) {
-            List<SlotReference> slotReferenceList = namedExpression.collect(SlotReference.class::isInstance);
-            slotSet.addAll(slotReferenceList);
-        }
-        StatsDeriveResult stat = groupExpression.getCopyOfChildStats(0);
-        Map<Slot, ColumnStats> slotColumnStatsMap = stat.getSlotToColumnStats();
-        slotColumnStatsMap.entrySet().removeIf(entry -> !slotSet.contains(entry.getKey()));
-        return stat;
+        List<NamedExpression> projections = project.getProjects();
+        StatsDeriveResult statsDeriveResult = groupExpression.getCopyOfChildStats(0);
+        Map<Slot, ColumnStats> childColumnStats = statsDeriveResult.getSlotToColumnStats();
+        Map<Slot, ColumnStats> columnsStats = projections.stream().map(projection -> {
+            Set<Slot> slots = projection.getInputSlots();
+            if (slots.isEmpty()) {
+                return new AbstractMap.SimpleEntry<>(projection.toSlot(), ColumnStats.createDefaultColumnStats());
+            } else {
+                // TODO: just a trick here, need to do real project on column stats
+                return new AbstractMap.SimpleEntry<>(projection.toSlot(),
+                        childColumnStats.get(slots.iterator().next()));
+            }
+        }).collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (item1, item2) -> item1));
+        statsDeriveResult.setSlotToColumnStats(columnsStats);
+        return statsDeriveResult;
     }
-
 }

@@ -17,10 +17,10 @@
 
 package org.apache.doris.nereids.jobs.rewrite;
 
-import org.apache.doris.common.Pair;
 import org.apache.doris.nereids.jobs.Job;
 import org.apache.doris.nereids.jobs.JobContext;
 import org.apache.doris.nereids.jobs.JobType;
+import org.apache.doris.nereids.memo.CopyInResult;
 import org.apache.doris.nereids.memo.Group;
 import org.apache.doris.nereids.memo.GroupExpression;
 import org.apache.doris.nereids.pattern.GroupExpressionMatching;
@@ -67,22 +67,24 @@ public class RewriteTopDownJob extends Job {
         List<Rule> validRules = getValidRules(logicalExpression, rules);
         for (Rule rule : validRules) {
             Preconditions.checkArgument(rule.isRewrite(),
-                    "in top down job, rules must be rewritable");
+                    "rules must be rewritable in top down job");
             GroupExpressionMatching groupExpressionMatching
                     = new GroupExpressionMatching(rule.getPattern(), logicalExpression);
-            //In topdown job, there must be only one matching plan.
-            //This `for` loop runs at most once.
+            // In topdown job, there must be only one matching plan.
+            // This `for` loop runs at most once.
             for (Plan before : groupExpressionMatching) {
-                List<Plan> afters = rule.transform(before, context.getPlannerContext());
+                context.onInvokeRule(rule.getRuleType());
+                List<Plan> afters = rule.transform(before, context.getCascadesContext());
                 Preconditions.checkArgument(afters.size() == 1);
                 Plan after = afters.get(0);
                 if (after != before) {
-                    Pair<Boolean, GroupExpression> pair = context.getPlannerContext()
-                            .getMemo().copyIn(after, group, rule.isRewrite());
-                    if (pair.first) {
-                        //new group-expr replaced the origin group-expr in `group`,
-                        //run this rule against this `group` again.
-                        pushTask(new RewriteTopDownJob(group, rules, context));
+                    CopyInResult result = context.getCascadesContext()
+                            .getMemo()
+                            .copyIn(after, group, rule.isRewrite());
+                    if (result.generateNewExpression) {
+                        // new group-expr replaced the origin group-expr in `group`,
+                        // run this rule against this `group` again.
+                        pushJob(new RewriteTopDownJob(group, rules, context));
                         return;
                     }
                 }
@@ -90,7 +92,7 @@ public class RewriteTopDownJob extends Job {
         }
 
         for (Group childGroup : group.getLogicalExpression().children()) {
-            pushTask(new RewriteTopDownJob(childGroup, rules, context));
+            pushJob(new RewriteTopDownJob(childGroup, rules, context));
         }
     }
 }

@@ -28,6 +28,7 @@ import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
 import org.apache.doris.rewrite.ExprRewriter;
+import org.apache.doris.thrift.TNullSide;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -185,7 +186,7 @@ public class InlineViewRef extends TableRef {
 
         // Analyze the inline view query statement with its own analyzer
         inlineViewAnalyzer = new Analyzer(analyzer);
-
+        inlineViewAnalyzer.setInlineView(true);
         queryStmt.analyze(inlineViewAnalyzer);
         correlatedTupleIds.addAll(queryStmt.getCorrelatedTupleIds(inlineViewAnalyzer));
 
@@ -364,7 +365,11 @@ public class InlineViewRef extends TableRef {
             if (!requiresNullWrapping(analyzer, smap.getRhs().get(i), nullSMap)) {
                 continue;
             }
-            params.add(new TupleIsNullPredicate(materializedTupleIds));
+            if (analyzer.isOuterJoinedLeftSide(materializedTupleIds.get(0))) {
+                params.add(new TupleIsNullPredicate(materializedTupleIds, TNullSide.LEFT));
+            } else {
+                params.add(new TupleIsNullPredicate(materializedTupleIds, TNullSide.RIGHT));
+            }
             params.add(NullLiteral.create(smap.getRhs().get(i).getType()));
             params.add(smap.getRhs().get(i));
             Expr ifExpr = new FunctionCallExpr("if", params);

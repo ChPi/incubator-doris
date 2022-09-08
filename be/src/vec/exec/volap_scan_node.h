@@ -62,6 +62,8 @@ public:
                      std::vector<std::unique_ptr<OlapScanRange>>* sub_scan_range,
                      RuntimeProfile* profile);
 
+    std::string get_name() override;
+
 private:
     // In order to ensure the accuracy of the query result
     // only key column conjuncts will be remove as idle conjunct
@@ -74,7 +76,8 @@ private:
     template <bool IsFixed, PrimitiveType PrimitiveType, typename ChangeFixedValueRangeFunc>
     static Status change_value_range(ColumnValueRange<PrimitiveType>& range, void* value,
                                      const ChangeFixedValueRangeFunc& func,
-                                     const std::string& fn_name, int slot_ref_child = -1);
+                                     const std::string& fn_name, bool cast_date_to_datetime = true,
+                                     int slot_ref_child = -1);
 
     void transfer_thread(RuntimeState* state);
     void scanner_thread(VOlapScanner* scanner);
@@ -243,7 +246,7 @@ private:
     std::vector<TRuntimeFilterDesc> _runtime_filter_descs;
     std::vector<RuntimeFilterContext> _runtime_filter_ctxs;
     std::vector<bool> _runtime_filter_ready_flag;
-    std::vector<std::unique_ptr<std::mutex>> _rf_locks;
+    std::shared_mutex _rf_lock;
     std::map<int, RuntimeFilterContext*> _conjunctid_to_runtime_filter_ctxs;
 
     std::unique_ptr<RuntimeProfile> _scanner_profile;

@@ -20,16 +20,15 @@ package org.apache.doris.nereids.rules.rewrite.logical;
 import org.apache.doris.nereids.rules.Rule;
 import org.apache.doris.nereids.rules.RuleType;
 import org.apache.doris.nereids.rules.rewrite.OneRewriteRuleFactory;
-import org.apache.doris.nereids.trees.expressions.BooleanLiteral;
 import org.apache.doris.nereids.trees.expressions.ComparisonPredicate;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.Slot;
+import org.apache.doris.nereids.trees.expressions.literal.BooleanLiteral;
 import org.apache.doris.nereids.trees.plans.GroupPlan;
 import org.apache.doris.nereids.trees.plans.Plan;
 import org.apache.doris.nereids.trees.plans.logical.LogicalFilter;
 import org.apache.doris.nereids.trees.plans.logical.LogicalJoin;
 import org.apache.doris.nereids.util.ExpressionUtils;
-import org.apache.doris.nereids.util.SlotExtractor;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
@@ -71,7 +70,7 @@ public class PushPredicateThroughJoin extends OneRewriteRuleFactory {
             LogicalJoin<GroupPlan, GroupPlan> join = filter.child();
 
             Expression wherePredicates = filter.getPredicates();
-            Expression onPredicates = join.getCondition().orElse(BooleanLiteral.TRUE);
+            Expression onPredicates = join.getOtherJoinCondition().orElse(BooleanLiteral.TRUE);
 
             List<Expression> otherConditions = Lists.newArrayList();
             List<Expression> eqConditions = Lists.newArrayList();
@@ -92,7 +91,7 @@ public class PushPredicateThroughJoin extends OneRewriteRuleFactory {
             List<Expression> rightPredicates = Lists.newArrayList();
 
             for (Expression p : otherConditions) {
-                Set<Slot> slots = SlotExtractor.extractSlot(p);
+                Set<Slot> slots = p.getInputSlots();
                 if (slots.isEmpty()) {
                     leftPredicates.add(p);
                     rightPredicates.add(p);
@@ -109,14 +108,13 @@ public class PushPredicateThroughJoin extends OneRewriteRuleFactory {
             otherConditions.removeAll(leftPredicates);
             otherConditions.removeAll(rightPredicates);
             otherConditions.addAll(eqConditions);
-            Expression joinConditions = ExpressionUtils.and(otherConditions);
 
-            return pushDownPredicate(join, joinConditions, leftPredicates, rightPredicates);
+            return pushDownPredicate(join, otherConditions, leftPredicates, rightPredicates);
         }).toRule(RuleType.PUSH_DOWN_PREDICATE_THROUGH_JOIN);
     }
 
     private Plan pushDownPredicate(LogicalJoin<GroupPlan, GroupPlan> joinPlan,
-            Expression joinConditions, List<Expression> leftPredicates, List<Expression> rightPredicates) {
+            List<Expression> joinConditions, List<Expression> leftPredicates, List<Expression> rightPredicates) {
 
         Expression left = ExpressionUtils.and(leftPredicates);
         Expression right = ExpressionUtils.and(rightPredicates);
@@ -131,7 +129,8 @@ public class PushPredicateThroughJoin extends OneRewriteRuleFactory {
             rightPlan = new LogicalFilter(right, rightPlan);
         }
 
-        return new LogicalJoin<>(joinPlan.getJoinType(), Optional.of(joinConditions), leftPlan, rightPlan);
+        return new LogicalJoin<>(joinPlan.getJoinType(), joinPlan.getHashJoinConjuncts(),
+                Optional.of(ExpressionUtils.and(joinConditions)), leftPlan, rightPlan);
     }
 
     private Expression getJoinCondition(Expression predicate, List<Slot> leftOutputs, List<Slot> rightOutputs) {
@@ -141,8 +140,8 @@ public class PushPredicateThroughJoin extends OneRewriteRuleFactory {
 
         ComparisonPredicate comparison = (ComparisonPredicate) predicate;
 
-        Set<Slot> leftSlots = SlotExtractor.extractSlot(comparison.left());
-        Set<Slot> rightSlots = SlotExtractor.extractSlot(comparison.right());
+        Set<Slot> leftSlots = comparison.left().getInputSlots();
+        Set<Slot> rightSlots = comparison.right().getInputSlots();
 
         if (!(leftSlots.size() >= 1 && rightSlots.size() >= 1)) {
             return null;

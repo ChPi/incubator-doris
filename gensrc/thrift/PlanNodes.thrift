@@ -55,6 +55,7 @@ enum TPlanNodeType {
   TABLE_FUNCTION_NODE,
   TABLE_VALUED_FUNCTION_SCAN_NODE,
   FILE_SCAN_NODE,
+  JDBC_SCAN_NODE,
 }
 
 // phases of an execution node
@@ -312,6 +313,12 @@ struct TOdbcScanNode {
   8: optional string query_string
 }
 
+struct TJdbcScanNode {
+  1: optional Types.TTupleId tuple_id
+  2: optional string table_name
+  3: optional string query_string
+}
+
 
 struct TBrokerScanNode {
     1: required Types.TTupleId tuple_id
@@ -436,6 +443,7 @@ struct TOlapScanNode {
   // When scan match sort_info, we can push limit into OlapScanNode.
   // It's limit for scanner instead of scanNode so we add a new limit.
   10: optional i64 sort_limit
+  11: optional bool enable_unique_key_merge_on_write
 }
 
 struct TEqJoinCondition {
@@ -560,7 +568,8 @@ struct TAggregationNode {
   5: required bool need_finalize
   6: optional bool use_streaming_preaggregation
   7: optional list<TSortInfo> agg_sort_infos
-  8: optional bool is_first_phase;
+  8: optional bool is_first_phase
+  9: optional bool use_fixed_length_serialization_opt
 }
 
 struct TRepeatNode {
@@ -885,6 +894,7 @@ struct TPlanNode {
 
   // file scan node
   44: optional TFileScanNode file_scan_node
+  45: optional TJdbcScanNode jdbc_scan_node
 
   101: optional list<Exprs.TExpr> projections
   102: optional Types.TTupleId output_tuple_id
