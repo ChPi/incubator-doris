@@ -511,15 +511,16 @@ public:
         std::vector<const ColumnUInt8*> nullmaps;
         for (int i = 0; i < arguments.size(); i++) {
             auto column = block.get_by_position(arguments[i]).column;
-            column_ptrs.push_back(column);
-            data_columns.push_back(check_and_get_column<ColumnString>(column_ptrs.back()->convert_to_full_column_if_const().get()));
+            column_ptrs.push_back(column->convert_to_full_column_if_const());
             const ColumnNullable* col_nullable = check_and_get_column<ColumnNullable>(column_ptrs.back().get());
             if (col_nullable != nullptr) {
                 const ColumnUInt8* col_nullmap = check_and_get_column<ColumnUInt8>(
                                 col_nullable->get_null_map_column_ptr().get());
                 nullmaps.push_back(col_nullmap);
+                data_columns.push_back(assert_cast<const ColumnString*>(col_nullable->get_nested_column_ptr().get()));
             } else {
                 nullmaps.push_back(ColumnUInt8::create(input_rows_count, 0));
+                data_columns.push_back(assert_cast<const ColumnString*>(column_ptrs.back().get()));
             }
         }
         execute(data_columns, *assert_cast<ColumnString*>(result_column.get()),
