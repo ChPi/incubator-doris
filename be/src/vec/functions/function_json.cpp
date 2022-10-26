@@ -419,19 +419,19 @@ struct FunctionJsonArrayImpl {
                               rapidjson::Document::AllocatorType& allocator, const std::vector<const ColumnUInt8*>& nullmaps) {
         for (int i = 0; i < data_columns.size() - 1; i++) {
             constexpr_loop_match<'0', '6', JsonParser>(type_flags[i], objects, allocator,
-                                                       data_columns[i], nullmaps[i+1]);
+                                                       data_columns[i], nullmaps[i+1]->get_data());
         }
     }
 
     template <typename TypeImpl>
     static void execute_type(std::vector<rapidjson::Value>& objects,
                              rapidjson::Document::AllocatorType& allocator,
-                             const ColumnString* data_column, const ColumnUInt8* nullmap) {
+                             const ColumnString* data_column, const NullMap& nullmap) {
         StringParser::ParseResult result;
         rapidjson::Value value;
 
         for (int i = 0; i < objects.size(); i++) {
-            if (nullmap != nullptr && nullmap->get_data()[i]) {
+            if (nullmap[i]) {
                 JsonParser<'0'>::update_value(result, value, data_column->get_data_at(i), allocator);
             } else {
                 TypeImpl::update_value(result, value, data_column->get_data_at(i), allocator);
@@ -456,14 +456,14 @@ struct FunctionJsonObjectImpl {
 
         for (int i = 0; i + 1 < data_columns.size() - 1; i += 2) {
             constexpr_loop_match<'0', '6', JsonParser>(type_flags[i + 1], objects, allocator,
-                                                       data_columns[i], data_columns[i + 1], nullmaps[i + 1]);
+                                                       data_columns[i], data_columns[i + 1], nullmaps[i + 1]->get_data());
         }
     }
 
     template <typename TypeImpl>
     static void execute_type(std::vector<rapidjson::Value>& objects,
                              rapidjson::Document::AllocatorType& allocator,
-                             const ColumnString* key_column, const ColumnString* value_column, const ColumnUInt8* nullmap) {
+                             const ColumnString* key_column, const ColumnString* value_column, const NullMap& nullmap) {
         StringParser::ParseResult result;
         rapidjson::Value key;
         rapidjson::Value value;
@@ -471,11 +471,10 @@ struct FunctionJsonObjectImpl {
         for (int i = 0; i < objects.size(); i++) {
             JsonParser<'4'>::update_value(result, key, key_column->get_data_at(i),
                                           allocator); // key always is string
-            StringRef data = value_column->get_data_at(i);
-            if (nullmap != nullptr && nullmap->get_data()[i]) {
-                JsonParser<'0'>::update_value(result, value, data, allocator);
+            if (nullmap[i]) {
+                JsonParser<'0'>::update_value(result, value, value_column->get_data_at(i), allocator);
             } else {
-                TypeImpl::update_value(result, value, data, allocator);
+                TypeImpl::update_value(result, value, value_column->get_data_at(i), allocator);
             }
             objects[i].AddMember(key, value, allocator);
         }
@@ -512,17 +511,16 @@ public:
         std::vector<const ColumnUInt8*> nullmaps;
         for (int i = 0; i < arguments.size(); i++) {
             auto column = block.get_by_position(arguments[i]).column;
-            const ColumnNullable* col_nullable = check_and_get_column<ColumnNullable>(column.get());
+            column_ptrs.push_back(column);
+            data_columns.push_back(assert_cast<const ColumnString*>(column_ptrs.back()->convert_to_full_column_if_const().get()));
+            const ColumnNullable* col_nullable = check_and_get_column<ColumnNullable>(column_ptrs.back().get());
             if (col_nullable != nullptr) {
                 const ColumnUInt8* col_nullmap = check_and_get_column<ColumnUInt8>(
                                 col_nullable->get_null_map_column_ptr().get());
                 nullmaps.push_back(col_nullmap);
             } else {
-                nullmaps.push_back(nullptr);
+                nullmaps.push_back(ColumnUInt8::create(input_rows_count, 0));
             }
-            column_ptrs.push_back(
-                    column->convert_to_full_column_if_const());
-            data_columns.push_back(assert_cast<const ColumnString*>(column_ptrs.back().get()));
         }
         execute(data_columns, *assert_cast<ColumnString*>(result_column.get()),
                       input_rows_count, nullmaps);
